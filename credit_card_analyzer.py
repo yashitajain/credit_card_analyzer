@@ -112,7 +112,7 @@ def create_visualizations(df):
     """Create visualizations for the data"""
     # Daily spending trend
     daily_spending = df.groupby('Transaction Date')['Amount'].sum().reset_index()
-    fig1 = px.line(daily_spending, x='Transaction Date', y='Amount', 
+    fig1 = px.bar(daily_spending, x='Transaction Date', y='Amount', 
                    title='Daily Spending Trend')
     
     # Category spending (if Category column exists)
