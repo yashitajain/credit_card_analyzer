@@ -61,10 +61,10 @@ if 'vector_store' not in st.session_state:
 if 'combined_df' not in st.session_state:
     st.session_state.combined_df = None
 
-def process_statement(file, filename):
-    """Process a credit card statement and return a DataFrame"""
+def process_statement1(file, filename):
+    #Process a credit card statement and return a DataFrame"""
     try:
-        df = pd.read_csv(file)
+        df = pd.read_csv(file,parse_dates=True, infer_datetime_format=True)
         # Convert Date column to datetime
         df['Transaction Date'] = pd.to_datetime(df['Transaction Date'])
         # Add filename as card identifier
@@ -73,6 +73,67 @@ def process_statement(file, filename):
     except Exception as e:
         st.error(f"Error processing {filename}: {str(e)}")
         return None
+
+
+def process_statement(file, filename):
+    """Process the bank statement with flexible handling for different formats."""
+    try:
+        # Load the CSV
+        df = pd.read_csv(file, delimiter=",", quotechar='"', skipinitialspace=True)
+
+        # Check if the file is incorrectly parsed into a single column or properly formatted
+        if len(df.columns) == 1:  # Single-column issue
+            print("⚠️ Detected single-column format. Splitting columns...")
+            
+            # Split the single-column data into multiple columns
+            df_split = df[df.columns[0]].str.split(',', expand=True)
+
+            # Merge date columns into one
+            df_split['Transaction Date'] = df_split[0] + " " + df_split[1]
+            df_split['Transaction Date'] = pd.to_datetime(df_split['Transaction Date'], errors='coerce')
+
+            # Clean and convert amount fields
+            df_split['Debit'] = df_split[3].str.replace('"', '').str.strip().replace('', '0').astype(float)
+            df_split['Credit'] = df_split[4].str.replace('"', '').str.strip().replace('', '0').astype(float)
+
+            # Calculate the final Amount column
+            df_split['Amount'] = df_split['Debit'] - df_split['Credit']
+
+            # Rename and structure the final DataFrame
+            df_cleaned = df_split.rename(columns={
+                2: 'Description',
+                5: 'Category'
+            })[['Transaction Date', 'Description', 'Amount', 'Category']]
+
+        else:  # Properly formatted CSV
+            print("✅ Detected properly formatted CSV.")
+            
+            # Rename columns
+            df.rename(columns={
+               # 'Date': 'Transaction Date',
+                'Description': 'Description',
+               # 'Debit': 'Amount',
+                'Category': 'Category'
+            }, inplace=True)
+
+            # Convert date to datetime format
+            df['Transaction Date'] = pd.to_datetime(df['Transaction Date'], errors='coerce')
+
+            # Calculate the final Amount
+           # df['Amount'] = pd.to_numeric(df['Debit'].fillna(0)) - pd.to_numeric(df['Credit'].fillna(0))
+
+            # Select relevant columns
+            df_cleaned = df[['Transaction Date', 'Description', 'Amount', 'Category']]
+
+        # Add filename as card identifier
+        df_cleaned['Card_Name'] = filename
+
+        return df_cleaned
+
+    except Exception as e:
+        print(f"❌ Error processing {filename}: {str(e)}")
+        return None
+
 
 def create_text_summary(df):
     """Create a text summary of the statement"""
@@ -112,8 +173,9 @@ def setup_vector_store(summaries):
 def create_visualizations(df):
     """Create visualizations for the data"""
     # Daily spending trend
-    daily_spending = df.groupby('Transaction Date')['Amount'].sum().reset_index()
-    fig1 = px.line(daily_spending, x='Transaction Date', y='Amount', 
+    #daily_spending = df.groupby('Transaction Date','Card_Name')['Amount'].sum().reset_index()
+    daily_spending = df.groupby(['Transaction Date', 'Card_Name'], as_index=False).agg({'Amount': 'sum'})
+    fig1 = px.bar(daily_spending, x='Transaction Date', y='Amount', color ='Card_Name',
                    title='Daily Spending Trend')
     
     # Category spending (if Category column exists)
