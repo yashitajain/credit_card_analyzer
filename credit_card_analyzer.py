@@ -15,8 +15,21 @@ import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
 
+# Set page config
+st.set_page_config(
+    page_title="Credit Card Statement Analyzer",
+    page_icon="💳",
+    layout="wide"
+)
+
 # Load environment variables
 load_dotenv()
+api_key = st.text_input("Enter your OpenAI API Key:", type="password")
+if not api_key:
+    st.warning("Please enter your OpenAI API key to continue.")
+    st.stop()
+
+os.environ["OPENAI_API_KEY"] = api_key
 
 # Initialize OpenAI with correct parameters
 try:
@@ -31,12 +44,7 @@ except Exception as e:
 
 embeddings = OpenAIEmbeddings()
 
-# Set page config
-st.set_page_config(
-    page_title="Credit Card Statement Analyzer",
-    page_icon="💳",
-    layout="wide"
-)
+
 
 # Title and description
 st.title("💳 Credit Card Statement Analyzer")
