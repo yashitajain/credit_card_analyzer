@@ -12,3 +12,4 @@ pypdf
 chromadb
 faiss-cpu
 plotly
+streamlit
