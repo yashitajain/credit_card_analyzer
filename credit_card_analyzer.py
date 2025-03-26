@@ -33,13 +33,13 @@ embeddings = OpenAIEmbeddings()
 
 # Set page config
 st.set_page_config(
-    page_title="Credit Card Statement Analyzer",
+    page_title="Bank and Credit Card Statement Analyzer",
     page_icon="💳",
     layout="wide"
 )
 
 # Title and description
-st.title("💳 Credit Card Statement Analyzer")
+st.title("💳 Bank and Credit Card Statement Analyzer")
 st.markdown("""
 This app helps you analyze your credit card statements and answer questions about your spending patterns.
 Upload your credit card statements in CSV format, and ask questions about your spending!
@@ -47,7 +47,7 @@ Upload your credit card statements in CSV format, and ask questions about your s
 
 # File uploader
 uploaded_files = st.file_uploader(
-    "Upload your credit card statements (CSV files)",
+    "Upload your bank/credit card statements (CSV files)",
     type=['csv'],
     accept_multiple_files=True
 )
@@ -132,6 +132,83 @@ def process_statement(file, filename):
     except Exception as e:
         print(f"❌ Error processing {filename}: {str(e)}")
         return None
+
+def process_statement2(file, filename):
+    """Process bank statements dynamically and detect HDFC format."""
+    try:
+        # Load the CSV file
+        df = pd.read_csv(file, delimiter=",", quotechar='"', skipinitialspace=True)
+
+        # ✅ Detect HDFC format by checking for metadata or empty header
+        if len(df.columns) == 1 or "********" in str(df.columns[0]):
+            print(f"🔍 Detected HDFC format in {filename}. Processing as HDFC...")
+
+            # Reload the HDFC statement, skipping the metadata rows
+            df = pd.read_csv(file, skiprows=19)
+
+            # Use positional indexing for HDFC columns
+            df_cleaned = pd.DataFrame({
+                'Transaction Date': pd.to_datetime(df.iloc[:, 0], errors='coerce'),
+                'Description': df.iloc[:, 1],
+                'Debit': pd.to_numeric(df.iloc[:, 4].str.replace(',', ''), errors='coerce').fillna(0),
+                'Credit': pd.to_numeric(df.iloc[:, 5].str.replace(',', ''), errors='coerce').fillna(0)
+            })
+
+            # Calculate the Amount column (Credit - Debit)
+            df_cleaned['Amount'] = df_cleaned['Credit'] - df_cleaned['Debit']
+
+        else:
+            print(f"✅ Processing standard CSV format for {filename}...")
+
+            # Handle properly formatted CSVs or single-column issues
+            if len(df.columns) == 1:
+                print(f"⚠️ Detected single-column format in {filename}. Splitting columns...")
+
+                # Split into multiple columns
+                df_split = df[df.columns[0]].str.split(',', expand=True)
+
+                # Merge date columns
+                df_split['Transaction Date'] = df_split[0] + " " + df_split[1]
+                df_split['Transaction Date'] = pd.to_datetime(df_split['Transaction Date'], errors='coerce')
+
+                # Clean debit/credit columns
+                df_split['Debit'] = pd.to_numeric(df_split[3].str.replace('"', '').str.strip().replace('', '0'), errors='coerce').fillna(0)
+                df_split['Credit'] = pd.to_numeric(df_split[4].str.replace('"', '').str.strip().replace('', '0'), errors='coerce').fillna(0)
+
+                # Calculate Amount
+                df_split['Amount'] = df_split['Debit'] - df_split['Credit']
+
+                # Rename and structure
+                df_cleaned = df_split.rename(columns={2: 'Description', 5: 'Category'})[['Transaction Date', 'Description', 'Amount']]
+
+            else:
+                # Properly formatted CSV
+                df.rename(columns={
+                   # 'Date': 'Transaction Date',
+                    'Description': 'Description',
+                    #'Debit': 'Debit',
+                    #'Credit': 'Credit',
+                    'Category': 'Category'
+                }, inplace=True)
+
+                # Convert dates
+                df['Transaction Date'] = pd.to_datetime(df['Transaction Date'], errors='coerce')
+
+                # Calculate Amount
+               # df['Amount'] = pd.to_numeric(df['Debit'].fillna(0)) - pd.to_numeric(df['Credit'].fillna(0))
+
+                # Select relevant columns
+                df_cleaned = df[['Transaction Date', 'Description', 'Amount']]
+
+        # Add filename for identification
+        df_cleaned['Card_Name'] = filename
+
+        return df_cleaned
+
+    except Exception as e:
+        print(f"❌ Error processing {filename}: {str(e)}")
+        return None
+
 
 
 def create_text_summary(df):
