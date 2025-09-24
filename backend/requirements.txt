@@ -1,0 +1,9 @@
+fastapi 
+uvicorn 
+langchain 
+openai 
+pypdf2 
+python-multipart
+langchain-openai
+tiktoken
+pymupdf

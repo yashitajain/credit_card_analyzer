@@ -1,0 +1,12 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Node.js build
+node_modules/
+.next/
+dist/
+build/
+
+# Logs
+*.log
