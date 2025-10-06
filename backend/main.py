@@ -7,6 +7,13 @@ from langchain_openai import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
 from langchain.chains import LLMChain
 from langchain.output_parsers import StructuredOutputParser, ResponseSchema
+from dotenv import load_dotenv
+import os
+
+load_dotenv()  # loads from .env automatically
+
+openai_api_key = os.getenv("OPENAI_API_KEY")
+groq_api_key = os.getenv("GROQ_API_KEY")
 
 app = FastAPI()
 
@@ -51,7 +58,7 @@ response_schemas = [
     ),
     ResponseSchema(
         name="summary",
-        description="Dict of top spending categories with numeric % share."
+        description="Dict of top spending categories with numeric percentage share."
     ),
     ResponseSchema(
         name="recommendations",
