@@ -10,3 +10,5 @@ pymupdf
 pandas
 python-dotenv
 openpyxl
+langchain-core
+langchain-community
