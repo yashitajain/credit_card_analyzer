@@ -17,8 +17,8 @@ from openpyxl import Workbook
 import pandas as pd
 
 from langchain_openai import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate
-from langchain.output_parsers import StructuredOutputParser, ResponseSchema
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StructuredOutputParser, ResponseSchema
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
