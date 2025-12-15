@@ -9,3 +9,4 @@ tiktoken
 pymupdf
 pandas
 python-dotenv
+openpyxl
