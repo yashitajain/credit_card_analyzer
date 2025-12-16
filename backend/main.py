@@ -17,9 +17,11 @@ from openpyxl import Workbook
 import pandas as pd
 
 from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StructuredOutputParser, ResponseSchema
+from typing import List, Dict, Optional
+from pydantic import BaseModel, Field
 
+from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.prompts import PromptTemplate
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
@@ -41,6 +43,15 @@ app.add_middleware(
 def health():
     return {"status": "ok"}
 
+
+DISCRETIONARY_CATEGORIES = {
+    "Dining",
+    "Shopping",
+    "Entertainment",
+    "Travel",
+    "Food & Drink"
+}    
+
 # -----------------------------------------
 # Helpers: Extract raw PDF text (no hard preprocessing)
 # -----------------------------------------
@@ -55,32 +66,30 @@ def extract_pdf_text(pdf_bytes: bytes) -> str:
 # LLM Structured schema (per-file)
 # -----------------------------------------
 # Each file must produce metadata + transactions + summary + recommendations
-response_schemas = [
-    ResponseSchema(
-        name="metadata",
-        description=("Object containing file-level metadata: "
-                     "card_last4 (string or empty), statement_month (YYYY-MM if available), statement_year (YYYY if available), bank (string if identifiable)")
-    ),
-    ResponseSchema(
-        name="transactions",
-        description=("Array of objects. Each must include keys: "
-                     "date (MM/DD or MM/DD/YY or MM/DD/YYYY), merchant (string, non-empty), "
-                     "amount (number, positive for charges), category (string).")
-    ),
-    ResponseSchema(
-        name="summary",
-        description="Object mapping category -> percentage of total spending (float, no % sign)."
-    ),
-    ResponseSchema(
-        name="recommendations",
-        description="Array of 2–5 short personalized recommendations based on the file's transactions."
-    ),
-]
-parser = StructuredOutputParser.from_response_schemas(response_schemas)
+class Metadata(BaseModel):
+    card_last4: Optional[str] = Field(None)
+    statement_month: Optional[str] = Field(None, description="YYYY-MM")
+    statement_year: Optional[str] = Field(None, description="YYYY")
+    bank: Optional[str] = Field(None)
+class Transaction(BaseModel):
+    date: str = Field(description="MM/DD or MM/DD/YY or MM/DD/YYYY")
+    merchant: str
+    amount: float = Field(description="Positive number for charges only")
+    category: str
+class FileExtraction(BaseModel):
+    metadata: Metadata
+    transactions: List[Transaction]
+    summary: Dict[str, float]
+    recommendations: List[str]
+
+
+parser = PydanticOutputParser(pydantic_object=FileExtraction)
 format_instructions = parser.get_format_instructions()
 
-# Prompt: tells the model to extract file metadata + transactions (prompt-only approach)
-prompt_template = """
+
+
+prompt = PromptTemplate(
+    template="""
 You are a financial statement extractor.
 
 You will receive raw text copied from a single credit card statement PDF. It may contain headers, footers, page numbers, icons, and multi-line transactions.
@@ -90,32 +99,32 @@ Your job for THIS FILE:
 2) Identify transactions ONLY. A valid transaction MUST:
    - Start when a DATE appears (MM/DD, MM/DD/YY, or MM/DD/YYYY).
    - Contain a merchant (human readable, contains letters).
-   - Contain an amount (like 23.49, $23.49, 2,275.00, (15.99)). Parentheses indicate negative (credit/refund) — output positive charge amounts only (i.e., skip negative refunds in "amount" but you can keep them as separate records if you want, mark category "Refund" or ignore).
-   - If a transaction is multi-line, MERGE lines until the first amount; that amount belongs to that transaction.
-   - Mention card name 
-3) Assign each credit card transaction to ONE category from the list below.
-Allowed categories (choose EXACTLY one): 
+   - Contain an amount (like 23.49, $23.49, 2,275.00, (15.99)).
+   - Parentheses indicate refunds → SKIP negative refunds or mark category "Refund".
+   - If multi-line, MERGE until first amount.
+3) Assign ONE category from this list ONLY:
 [Groceries, Dining, Coffee & Tea, Subscriptions, Shopping, Bills & Utilities, Transportation, Travel, Entertainment, Health & Wellness, Education, Other]
 
 Rules:
-- Return ONLY the category name. No sentences.
+- Category must be EXACTLY one from the list.
 - If unsure, choose "Other".
-- Do NOT create any new categories.
-- Do NOT return explanations or extra text.
-4) Ignore totals, page headers/footers, rewards text, and other non-transaction noise.
+- No explanations.
 
-Return STRICT JSON that matches the schema below. Do NOT include extra keys or prose.
-
-Schema instructions:
+Return STRICT JSON that matches this schema:
 {format_instructions}
 
-RAW FILE TEXT BELOW:
+RAW FILE TEXT:
 {statement}
-"""
-prompt = ChatPromptTemplate.from_template(prompt_template)
+""",
+    input_variables=["statement"],
+    partial_variables={"format_instructions": format_instructions},
+)
+
+
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)  # deterministic
 
-chain = prompt | llm
+chain = prompt | llm | parser
+
 
 # -----------------------------------------
 # Normalization helpers (backend canonicalization)
@@ -194,6 +203,7 @@ def compute_aggregates(all_txns: List[Dict[str, Any]]):
     monthly = defaultdict(float)
     card_spend = defaultdict(float)
     category_spend = defaultdict(float)
+    discretionary_spent = 0.0
     total_spent = 0.0
 
     for t in all_txns:
@@ -226,14 +236,27 @@ def compute_aggregates(all_txns: List[Dict[str, Any]]):
         cat = t.get("category") or "Other"
         category_spend[cat] += amt
 
+
+        if cat in DISCRETIONARY_CATEGORIES:
+            discretionary_spent += amt
+
+
     # compute percent shares
     summary = {k: round(v / (total_spent or 1.0) * 100, 2) for k, v in category_spend.items()}
+    valid_months = [v for k, v in monthly.items() if k != "unknown"]
+
+    avg_monthly_spend = round(
+    sum(valid_months) / max(len(valid_months), 1),
+    2
+        )
     return {
         "monthly_spending": dict(monthly),
         "card_spend": dict(card_spend),
         "category_spend": dict(category_spend),
         "total_spent": round(total_spent, 2),
-        "category_summary_percent": summary
+        "category_summary_percent": summary,
+        "avg_monthly_spend": avg_monthly_spend,
+        "discretionary_spent": round(discretionary_spent, 2)
     }
 
 # -----------------------------------------
@@ -268,35 +291,26 @@ async def analyze_statement(files: List[UploadFile] = File(...)):
             raw_text = extract_pdf_text(content)
             log.info("Processing file %s length=%d chars", f.filename, len(raw_text))
 
-            # Prepare and call LLM (prompt-only)
-            llm_input = {
-                "statement": raw_text[:200_000],  # limit for safety
-                "format_instructions": format_instructions
-            }
-
             # If no API key, fallback to a simple mock (for dev)
+            # Prepare and call LLM
             if not OPENAI_API_KEY:
-                # Simple mock: return zero transactions (developer can fill)
-                parsed = {"metadata": {"card_last4": "", "statement_month": ""}, "transactions": [], "summary": {}, "recommendations": []}
+                parsed = FileExtraction(
+                    metadata=Metadata(),
+                    transactions=[],
+                    summary={},
+                    recommendations=[]
+                )
             else:
-                res = chain.invoke(llm_input)
-                try:
-                    parsed = parser.parse(res.content or "")
-                except Exception as pe:
-                    log.warning("Parser error for %s: %s", f.filename, pe)
-                    # attempt minimal JSON load fallback
-                    try:
-                        parsed = json.loads(res.content or "{}")
-                    except Exception:
-                        parsed = {"metadata": {}, "transactions": [], "summary": {}, "recommendations": []}
+                parsed = chain.invoke({
+                    "statement": raw_text[:200_000]
+                })
 
             # Normalize parsed contents
-            metadata = parsed.get("metadata", {}) or {}
-            txns_raw = parsed.get("transactions", []) or []
+            metadata = parsed.metadata.model_dump() if parsed.metadata else {}
             txns_normalized = []
-            for tx in txns_raw:
-                nt = normalize_transaction(tx)
-                # attach file-level metadata
+
+            for tx in parsed.transactions:
+                nt = normalize_transaction(tx.model_dump())
                 nt["source_file"] = f.filename
                 nt["card_last4"] = metadata.get("card_last4") or ""
                 nt["statement_year"] = metadata.get("statement_year") or ""
@@ -308,9 +322,10 @@ async def analyze_statement(files: List[UploadFile] = File(...)):
                 "file": f.filename,
                 "metadata": metadata,
                 "transactions": txns_normalized,
-                "summary": parsed.get("summary", {}),
-                "recommendations": parsed.get("recommendations", [])
+                "summary": parsed.summary or {},
+                "recommendations": parsed.recommendations or []
             }
+
             all_files_results.append(file_result)
 
         except Exception as e:
