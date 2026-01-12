@@ -13,3 +13,5 @@ openpyxl
 langchain-core
 langchain-community
 pydantic
+uuid
+asyncio

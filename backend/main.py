@@ -7,6 +7,10 @@ import tempfile
 from collections import defaultdict, Counter
 from datetime import datetime
 from typing import List, Dict, Any
+import uuid
+import time
+import asyncio
+
 
 import fitz  # PyMuPDF
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
@@ -29,6 +33,9 @@ if not OPENAI_API_KEY:
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("cc-analyzer")
+
+ANALYSIS_CACHE: Dict[str, Dict[str, Any]] = {}
+CACHE_TTL_SECONDS = 60 * 60  # 1 hour
 
 app = FastAPI()
 app.add_middleware(
@@ -262,50 +269,66 @@ def compute_aggregates(all_txns: List[Dict[str, Any]]):
 # -----------------------------------------
 # Export helpers
 # -----------------------------------------
-def export_transactions_excel(all_txns: List[Dict[str, Any]], out_path: str):
-    df = pd.DataFrame(all_txns)
-    df = df[["statement_month", "card_last4", "date", "merchant", "amount", "category"]].fillna("")
-    writer = pd.ExcelWriter(out_path, engine="openpyxl")
-    df.to_excel(writer, index=False, sheet_name="transactions")
-    writer.save()
 
 def export_transactions_csv(all_txns: List[Dict[str, Any]], out_path: str):
     df = pd.DataFrame(all_txns)
     df = df[["statement_month", "card_last4", "date", "merchant", "amount", "category"]].fillna("")
     df.to_csv(out_path, index=False)
 
+def cache_set(analysis_id: str, payload: Dict[str, Any]):
+    ANALYSIS_CACHE[analysis_id] = {"ts": time.time(), "payload": payload}
+
+def cache_get(analysis_id: str) -> Optional[Dict[str, Any]]:
+    item = ANALYSIS_CACHE.get(analysis_id)
+    if not item:
+        return None
+    if time.time() - item["ts"] > CACHE_TTL_SECONDS:
+        ANALYSIS_CACHE.pop(analysis_id, None)
+        return None
+    return item["payload"]
 # -----------------------------------------
 # Main: multi-file analyze endpoint
 # -----------------------------------------
 @app.post("/analyze")
 async def analyze_statement(files: List[UploadFile] = File(...)):
+    start_time = time.perf_counter()
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
+
     all_files_results = []
     all_txns = []
 
-    # iterate each uploaded PDF
-    for f in files:
+    # Limit parallel LLM calls (VERY important)
+    semaphore = asyncio.Semaphore(3)  # adjust to 2–4 depending on stability
+
+    async def process_file(f: UploadFile):
         try:
             content = await f.read()
             raw_text = extract_pdf_text(content)
-            log.info("Processing file %s length=%d chars", f.filename, len(raw_text))
 
-            # If no API key, fallback to a simple mock (for dev)
-            # Prepare and call LLM
-            if not OPENAI_API_KEY:
-                parsed = FileExtraction(
-                    metadata=Metadata(),
-                    transactions=[],
-                    summary={},
-                    recommendations=[]
-                )
-            else:
-                parsed = chain.invoke({
-                    "statement": raw_text[:200_000]
-                })
+            log.info(
+                "Processing file %s length=%d chars",
+                f.filename,
+                len(raw_text),
+            )
 
-            # Normalize parsed contents
+            # --- LLM CALL (guarded) ---
+            async with semaphore:
+                if not OPENAI_API_KEY:
+                    parsed = FileExtraction(
+                        metadata=Metadata(),
+                        transactions=[],
+                        summary={},
+                        recommendations=[],
+                    )
+                else:
+                    # Run blocking chain.invoke in a thread
+                    parsed = await asyncio.to_thread(
+                        chain.invoke,
+                        {"statement": raw_text[:200_000]},
+                    )
+
+            # --- Normalize ---
             metadata = parsed.metadata.model_dump() if parsed.metadata else {}
             txns_normalized = []
 
@@ -315,78 +338,110 @@ async def analyze_statement(files: List[UploadFile] = File(...)):
                 nt["card_last4"] = metadata.get("card_last4") or ""
                 nt["statement_year"] = metadata.get("statement_year") or ""
                 nt["statement_month"] = metadata.get("statement_month") or ""
-                txns_normalized.append(nt)
-                all_txns.append(nt)
 
-            file_result = {
+                txns_normalized.append(nt)
+
+            return {
                 "file": f.filename,
                 "metadata": metadata,
                 "transactions": txns_normalized,
                 "summary": parsed.summary or {},
-                "recommendations": parsed.recommendations or []
-            }
-
-            all_files_results.append(file_result)
+                "recommendations": parsed.recommendations or [],
+            }, txns_normalized
 
         except Exception as e:
-            log.exception("Failed processing file %s: %s", f.filename if f else "unknown", e)
-            file_result = {"file": getattr(f, "filename", "unknown"), "error": str(e)}
-            all_files_results.append(file_result)
-            continue
+            log.exception("Failed processing file %s", f.filename)
+            return {
+                "file": f.filename,
+                "error": str(e),
+            }, []
 
-    # After processing all files -> compute combined analytics
+    # -----------------------------
+    # Run all files in parallel
+    # -----------------------------
+    results = await asyncio.gather(
+        *(process_file(f) for f in files),
+        return_exceptions=False,
+    )
+
+    # -----------------------------
+    # Collect results
+    # -----------------------------
+    for file_result, txns in results:
+        all_files_results.append(file_result)
+        all_txns.extend(txns)
+
+    # -----------------------------
+    # Compute combined analytics
+    # -----------------------------
     aggregates = compute_aggregates(all_txns)
     flags = detect_suspicious_and_duplicates(all_txns)
 
-    # Build global recommendations (simple merge of file recs plus LLM-level suggestions)
+    # -----------------------------
+    # Global recommendations
+    # -----------------------------
     global_recommendations = []
+
     for fr in all_files_results:
         for r in fr.get("recommendations", [])[:3]:
             if r not in global_recommendations:
                 global_recommendations.append(r)
-    # simple additional suggestions based on flags
+
     if flags["duplicates"]:
-        global_recommendations.append("We found possible duplicate charges across statements — review duplicates.")
+        global_recommendations.append(
+            "We found possible duplicate charges across statements — review duplicates."
+        )
+
     if flags["suspicious"]:
-        global_recommendations.append("Some transactions look like fees or recurring subscriptions — consider reviewing recurring charges.")
+        global_recommendations.append(
+            "Some transactions look like fees or recurring subscriptions — consider reviewing recurring charges."
+        )
+
+    # -----------------------------
+    # Cache response
+    # -----------------------------
+    analysis_id = str(uuid.uuid4())
+    end_time = time.perf_counter()
+    processing_time_sec = round(end_time - start_time, 2)
 
     response = {
+        "analysis_id": analysis_id,
+        "processing_time_sec": processing_time_sec,
         "files": all_files_results,
         "combined": {
             "all_transactions": all_txns,
             "aggregates": aggregates,
             "flags": flags,
-            "global_recommendations": global_recommendations
-        }
+            "global_recommendations": global_recommendations,
+        },
     }
 
-    return JSONResponse(content=response, media_type="application/json; charset=utf-8")
-
+    cache_set(analysis_id, response)
+    
+    
+    return JSONResponse(
+        content=response,
+        media_type="application/json; charset=utf-8",
+    )
 
 # -----------------------------------------
 # Exports: Excel & CSV for combined transactions
 # -----------------------------------------
-@app.post("/export/excel")
-async def export_excel(files: List[UploadFile] = File(...)):
-    # For convenience: reuse /analyze to get combined result, then export
-    analyze_resp = await analyze_statement(files)
-    data = analyze_resp.body.decode("utf-8")
-    parsed = json.loads(data)
-    all_txns = parsed.get("combined", {}).get("all_transactions", [])
 
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
-    tmp.close()
-    export_transactions_excel(all_txns, tmp.name)
-    return FileResponse(tmp.name, filename="transactions.xlsx", media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+@app.get("/export/csv/{analysis_id}")
+async def export_csv_by_id(analysis_id: str):
+    cached = cache_get(analysis_id)
+    if not cached:
+        raise HTTPException(status_code=404, detail="analysis_id not found or expired")
 
-@app.post("/export/csv")
-async def export_csv(files: List[UploadFile] = File(...)):
-    analyze_resp = await analyze_statement(files)
-    data = analyze_resp.body.decode("utf-8")
-    parsed = json.loads(data)
-    all_txns = parsed.get("combined", {}).get("all_transactions", [])
+    all_txns = cached.get("combined", {}).get("all_transactions", [])
 
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv")
     tmp.close()
     export_transactions_csv(all_txns, tmp.name)
-    return FileResponse(tmp.name, filename="transactions.csv", media_type="text/csv")
+
+    return FileResponse(
+        tmp.name,
+        filename="transactions.csv",
+        media_type="text/csv",
+    )
