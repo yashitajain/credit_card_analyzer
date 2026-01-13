@@ -11,5 +11,5 @@ It also the following tabs:
 	
     - Recommendations
 	
-    - Transactions by date, category, amount and merchan with csv export file 
+    - Transactions by date, category, amount and merchant with csv export file 
   
