@@ -12,4 +12,9 @@ It also the following tabs:
     - Recommendations
 	
     - Transactions by date, category, amount and merchant with csv export file 
+
+Here is the link to the app. https://creditcardanalyzer-zftp.vercel.app/ 
+
+Please let me know any feedback. I'm constantly updating my app to make it more efficient. Thank you! 
+
   
