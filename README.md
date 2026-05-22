@@ -33,7 +33,7 @@ Here is the link to the app. https://creditcardanalyzer-zftp.vercel.app/
 Stack Used: 
 - SQL
 - dbt
-- Python <img width="5" height="5" alt="image" src="https://github.com/user-attachments/assets/bb65aac8-6b16-482f-8205-cf2f8c61ccf4" />
+- Python <img width="20" height="20" alt="image" src="https://github.com/user-attachments/assets/bb65aac8-6b16-482f-8205-cf2f8c61ccf4" />
 
 
 
